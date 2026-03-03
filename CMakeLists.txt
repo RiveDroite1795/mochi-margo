@@ -21,13 +21,69 @@ option (ENABLE_TESTS "Enable tests" OFF)
 option (ENABLE_ASAN "Enable address sanitizer" OFF)
 option (ENABLE_EXAMPLES "Build examples in the docs folder" OFF)
 
+# eBPF/Tracing-friendly build defaults:
+#  - O0: minimize inlining/optimization side-effects for uprobes/symbol stability
+#  - -g3: full debug info (DWARF)
+#  - keep frame pointer + disable sibling-call optimization: better stack traces
+#  - avoid stripping on install
+option (MARGO_EBPF_FRIENDLY "Build with flags friendly to eBPF/uprobes and stack traces" ON)
+option (MARGO_FORCE_NO_OPTIMIZATION "Force -O0 in all build types (Release included)" ON)
+
+# Default build type: Debug (only for single-config generators like Make/Ninja)
+if (NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set (CMAKE_BUILD_TYPE "Debug" CACHE STRING "Build type" FORCE)
+endif ()
+
+# Helper: remove any -O* from a flags string (best-effort)
+function (_margo_strip_optimization_flags VAR_NAME)
+    if (DEFINED ${VAR_NAME})
+        set (_v "${${VAR_NAME}}")
+        # Remove -O0/-O1/-O2/-O3/-Os/-Og (keep other flags)
+        string (REGEX REPLACE "(^|[ \t])-(O[0-3gs]|Og)([ \t]|$)" " " _v "${_v}")
+        # Normalize whitespace
+        string (REGEX REPLACE "[ \t]+" " " _v "${_v}")
+        string (STRIP "${_v}" _v)
+        set (${VAR_NAME} "${_v}" PARENT_SCOPE)
+    endif ()
+endfunction ()
+
+if (MARGO_FORCE_NO_OPTIMIZATION)
+    _margo_strip_optimization_flags(CMAKE_C_FLAGS)
+    _margo_strip_optimization_flags(CMAKE_C_FLAGS_DEBUG)
+    _margo_strip_optimization_flags(CMAKE_C_FLAGS_RELEASE)
+    _margo_strip_optimization_flags(CMAKE_C_FLAGS_RELWITHDEBINFO)
+    _margo_strip_optimization_flags(CMAKE_C_FLAGS_MINSIZEREL)
+
+    # Force O0 in all build types.
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0")
+    set (CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O0")
+    set (CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O0")
+    set (CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -O0")
+    set (CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL} -O0")
+endif ()
+
+if (MARGO_EBPF_FRIENDLY)
+    # Debug info + stable call stacks for uprobes/stack traces
+    add_compile_options(
+        -g3
+        -fno-omit-frame-pointer
+        -fno-optimize-sibling-calls
+        -fno-inline
+        -Wall
+    )
+    # Never strip binaries on install; keep symbols for perf/bpftrace/uprobe.
+    set (CMAKE_INSTALL_DO_STRIP FALSE)
+endif ()
+
 if (ENABLE_COVERAGE)
+    # coverage typically implies O0 already; keep consistent
     set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage -O0")
     set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage -lgcov")
 endif ()
 
 if (ENABLE_ASAN)
-    set (CMAKE_C_FLAGS "-fno-omit-frame-pointer -g -Wall -fsanitize=address")
+    # ASAN wants frame pointers too; keep -g for usable stacks
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer -g -Wall -fsanitize=address")
     set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
 endif ()
 
