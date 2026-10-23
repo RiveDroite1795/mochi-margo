@@ -1,4 +1,72 @@
-# Margo
+# Margo (eBPF & Tracing-Friendly Fork)
+
+[English](README.md) | [中文](README.zh.md)
+
+> 🔬 **Research Fork Notice**: This repository is a specialized fork of [mochi-hpc/mochi-margo](https://github.com/mochi-hpc/mochi-margo), maintained as a sub-dependency for the [UnifyFS eBPF Diagnosis Project](https://github.com/RiveDroite1795/UnifyFS-ebpf-diagnosis).
+>
+> Only `CMakeLists.txt` is modified. **No source code of Margo, Argobots or Mercury is changed**, so behavior and ABI remain identical to upstream — the fork only changes *how* the code is compiled.
+
+---
+
+## 📌 Modifications in this Fork
+
+Tracing a user-level threading runtime is harder than tracing a plain library: Margo suspends and resumes Argobots ULTs around Mercury operations, so an RPC looks like a fast switch away from the caller rather than a long call. To make that switch observable with `uprobe` / `bpftrace`, the build must not optimize the ULT entry points away and must keep return addresses trustworthy.
+
+All changes live in `CMakeLists.txt`:
+
+1. **`MARGO_EBPF_FRIENDLY` option (default `ON`)**
+   - Adds `-g3` (full DWARF debug info).
+   - Adds `-fno-omit-frame-pointer` so `%rbp` stays a real frame pointer for stack unwinding.
+   - Adds `-fno-optimize-sibling-calls` so tail calls do not replace the original return address.
+   - Adds `-fno-inline` so ULT entry points and RPC dispatch helpers keep distinct symbol boundaries.
+   - Sets `CMAKE_INSTALL_DO_STRIP FALSE` — `make install` no longer strips the library, so `perf`, `bpftrace` and `uprobe` can resolve symbols from the installed `.so`.
+
+2. **`MARGO_FORCE_NO_OPTIMIZATION` option (default `ON`)**
+   - A dedicated helper `_margo_strip_optimization_flags()` removes any existing `-O0/-O1/-O2/-O3/-Os/-Og` from `CMAKE_C_FLAGS` **and** from every per-configuration variable (`DEBUG`, `RELEASE`, `RELWITHDEBINFO`, `MINSIZEREL`), then re-appends `-O0`.
+   - Stripping first matters: `CMAKE_C_FLAGS_RELEASE` already ends in `-O3`, and a later `-O0` appended without removal would be silently overridden, leaving inlined code and no usable probe points.
+
+3. **Default build type**
+   - When using a single-config generator (Make/Ninja) and no build type is given, `CMAKE_BUILD_TYPE` defaults to `Debug`.
+
+4. **ASan flag fix**
+   - The existing `ENABLE_ASAN` branch used to *overwrite* `CMAKE_C_FLAGS`; it now **appends** to it, so ASan builds no longer drop the tracing flags above.
+
+---
+
+## 🔨 Build & Install
+
+Both options default to `ON`, so a plain build is already tracing-ready:
+
+```bash
+git clone https://github.com/RiveDroite1795/mochi-margo.git
+cd mochi-margo
+mkdir build && cd build
+
+cmake .. \
+  -DCMAKE_INSTALL_PREFIX=$HOME/.local/unifyfs/stack/gcc-debug \
+  -DBUILD_SHARED_LIBS=ON \
+  -DENABLE_TESTS=OFF \
+  -DMARGO_EBPF_FRIENDLY=ON \
+  -DMARGO_FORCE_NO_OPTIMIZATION=ON
+
+make -j$(nproc)
+make install
+```
+
+To verify the result actually carries symbols and frame pointers:
+
+```bash
+# should show -g3 / -fno-omit-frame-pointer / -O0, and no -O2/-O3
+grep -o '\-O[0-9gs]\|\-fno-omit-frame-pointer' build/CMakeFiles/*/flags.make | sort -u
+
+# installed library must not be stripped
+file $HOME/.local/unifyfs/stack/gcc-debug/lib64/libmargo.so
+nm -D $HOME/.local/unifyfs/stack/gcc-debug/lib64/libmargo.so | grep -c ' T '
+```
+
+---
+
+*(Original Margo README follows below)*
 
 ![](https://github.com/mochi-hpc/mochi-margo/actions/workflows/test.yml/badge.svg?branch=main)
 [![codecov](https://codecov.io/gh/mochi-hpc/mochi-margo/branch/main/graph/badge.svg)](https://codecov.io/gh/mochi-hpc/mochi-margo)
@@ -96,6 +164,7 @@ Got RPC request with input_val: 0
 Got RPC request with input_val: 1
 Got RPC request with input_val: 2
 Got RPC request with input_val: 3
+Got RPC request with input_val: 4
 Got RPC request to shutdown
 
 $ examples/margo-example-client na+sm://13367/0
